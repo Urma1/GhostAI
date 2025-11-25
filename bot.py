@@ -173,7 +173,9 @@ async def ask_ai(user_message: str, chat_id: int):
 
     headers = {
         "Authorization": f"Bearer {OPENROUTER_KEY}",
-        "Content-Type": "application/json"
+        "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/Urma1/GhostAI",
+        "X-Title": "GhostAI Bot"
     }
 
     history = get_memory(chat_id)
