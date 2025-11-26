@@ -3,6 +3,7 @@ import asyncio
 import logging
 import os
 import sqlite3
+import signal
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
@@ -104,16 +105,8 @@ def get_memory(chat_id):
 
 load_dotenv()
 
-# Отладка: проверяем какие переменные окружения доступны
-print("🔍 Доступные переменные окружения (только названия):")
-env_vars = [key for key in os.environ.keys() if 'TOKEN' in key or 'KEY' in key or 'TELEGRAM' in key or 'OPENROUTER' in key]
-print(f"   Найдены: {env_vars}")
-
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
-
-print(f"📌 TOKEN загружен: {'✅ Да' if TOKEN else '❌ НЕТ'}")
-print(f"📌 OPENROUTER_KEY загружен: {'✅ Да' if OPENROUTER_KEY else '❌ НЕТ'}")
 
 # Проверка наличия обязательных переменных окружения
 if not TOKEN:
@@ -189,6 +182,72 @@ async def summarize_chat(chat_id: int):
 
     # в краткосрочной памяти оставляем только хвост
     memory_buffer[chat_id] = tail
+
+
+# -------------------------
+#  СОХРАНЕНИЕ ПАМЯТИ ПРИ ЗАВЕРШЕНИИ
+# -------------------------
+
+async def save_all_memories():
+    """
+    Сохраняет всю краткосрочную память в summary перед завершением бота.
+    Вызывается при получении сигнала остановки (SIGTERM/SIGINT).
+    """
+    print("🛑 Получен сигнал остановки. Сохраняю память всех чатов...")
+
+    # Проходим по всем чатам с активной памятью
+    for chat_id in list(memory_buffer.keys()):
+        history = memory_buffer.get(chat_id, [])
+
+        if not history or len(history) < 2:  # Пропускаем если слишком мало сообщений
+            continue
+
+        print(f"💾 Сохраняю {len(history)} сообщений для чата {chat_id}")
+
+        try:
+            # Создаём summary из всей истории (без деления на хвост)
+            conversation_text = "\n".join(
+                f"{m['role']}: {m['content']}" for m in history
+            )
+
+            url = "https://openrouter.ai/api/v1/chat/completions"
+            headers = {
+                "Authorization": f"Bearer {OPENROUTER_KEY}",
+                "Content-Type": "application/json"
+            }
+            body = {
+                "model": "x-ai/grok-4.1-fast:free",
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты делаешь краткую сводку переписки перед завершением сессии. "
+                            "Сжато опиши основные темы, важные факты и решения. "
+                            "3–5 коротких предложений."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": conversation_text
+                    }
+                ]
+            }
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                resp = await client.post(url, headers=headers, json=body)
+                data = resp.json()
+
+                if "choices" in data:
+                    summary = data["choices"][0]["message"]["content"]
+                    save_summary(chat_id, summary)
+                    print(f"✅ Память чата {chat_id} сохранена")
+                else:
+                    print(f"⚠️  Не удалось создать summary для чата {chat_id}")
+
+        except Exception as e:
+            print(f"❌ Ошибка при сохранении чата {chat_id}: {e}")
+
+    print("✅ Все чаты сохранены. Завершаю работу...")
 
 
 # -------------------------
@@ -292,34 +351,87 @@ async def handler(message: Message):
 
         bot_username = (await bot.get_me()).username.lower()
 
-        # если бота не упоминали — игнор
-        if f"@{bot_username}" not in message.text.lower():
-            return
+        # Добавляем ВСЕ сообщения в память (для контекста переписки)
+        add_to_memory(chat_id, "user", f"{username}: {message.text}")
 
-        # убираем упоминание
-        clean_text = message.text.replace(f"@{bot_username}", "").strip()
+        # Проверяем упоминание бота - отвечаем только если упомянули
+        if f"@{bot_username}" in message.text.lower():
+            # убираем упоминание для чистого запроса к AI
+            clean_text = message.text.replace(f"@{bot_username}", "").strip()
 
-        # добавляем в память с автором
-        add_to_memory(chat_id, "user", f"{username}: {clean_text}")
+            reply = await ask_ai(clean_text, chat_id)
 
-        reply = await ask_ai(clean_text, chat_id)
+            add_to_memory(chat_id, "assistant", f"Бот: {reply}")
 
-        add_to_memory(chat_id, "assistant", f"Бот: {reply}")
+            # если память большая — делаем summary
+            if len(get_memory(chat_id)) > MAX_MEMORY:
+                await summarize_chat(chat_id)
 
-        # если память большая — делаем summary
+            return await message.reply(reply)
+
+        # Если бота не упомянули - просто запомнили сообщение, не отвечаем
+        # Периодически делаем summary для общего контекста
         if len(get_memory(chat_id)) > MAX_MEMORY:
             await summarize_chat(chat_id)
-
-        return await message.reply(reply)
 
 
 # -------------------------
 #       СТАРТ ПОЛЛИНГА
 # -------------------------
 
+# Глобальная переменная для отслеживания запроса на остановку
+shutdown_event = asyncio.Event()
+
+
+def signal_handler(signum, frame):
+    """Обработчик системных сигналов (SIGTERM, SIGINT)"""
+    print(f"\n🛑 Получен сигнал {signum}. Инициирую graceful shutdown...")
+    shutdown_event.set()
+
+
 async def main():
     logging.basicConfig(level=logging.INFO)
-    await dp.start_polling(bot)
+
+    # Регистрируем обработчики сигналов
+    signal.signal(signal.SIGTERM, signal_handler)  # Railway отправляет SIGTERM при остановке
+    signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C локально
+
+    print("✅ Бот запущен. Нажмите Ctrl+C для остановки.")
+
+    try:
+        # Запускаем поллинг в отдельной задаче
+        polling_task = asyncio.create_task(dp.start_polling(bot))
+
+        # Ждём сигнала остановки или завершения поллинга
+        await asyncio.wait(
+            [polling_task, asyncio.create_task(shutdown_event.wait())],
+            return_when=asyncio.FIRST_COMPLETED
+        )
+
+        # Если получен сигнал остановки
+        if shutdown_event.is_set():
+            print("🔄 Останавливаю поллинг...")
+            polling_task.cancel()
+
+            try:
+                await polling_task
+            except asyncio.CancelledError:
+                pass
+
+            # Сохраняем всю память перед завершением
+            await save_all_memories()
+
+    except KeyboardInterrupt:
+        print("\n🛑 KeyboardInterrupt. Сохраняю память...")
+        await save_all_memories()
+
+    except Exception as e:
+        print(f"❌ Неожиданная ошибка: {e}")
+        await save_all_memories()
+
+    finally:
+        await bot.session.close()
+        print("👋 Бот остановлен.")
 
 
 if __name__ == "__main__":
