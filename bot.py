@@ -19,7 +19,8 @@ MAX_MEMORY = 100            # после этого числа сообщени�
 TAIL_AFTER_SUMMARY = 10     # сколько последних сообщений оставить после summary
 SUMMARY_LIMIT = 5           # сколько последних summary подгружать при ответе
 
-DB_PATH = "memory.db"
+# Railway Volume поддержка: если есть /data, используем её
+DB_PATH = os.getenv("DB_PATH", "/data/memory.db" if os.path.exists("/data") else "memory.db")
 
 
 # -------------------------
@@ -27,6 +28,11 @@ DB_PATH = "memory.db"
 # -------------------------
 
 def init_db():
+    # Создаём директорию для БД, если её нет
+    db_dir = os.path.dirname(DB_PATH)
+    if db_dir and not os.path.exists(db_dir):
+        os.makedirs(db_dir, exist_ok=True)
+
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("""
