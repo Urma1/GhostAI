@@ -103,8 +103,29 @@ def get_memory(chat_id):
 # -------------------------
 
 load_dotenv()
+
+# Отладка: проверяем какие переменные окружения доступны
+print("🔍 Доступные переменные окружения (только названия):")
+env_vars = [key for key in os.environ.keys() if 'TOKEN' in key or 'KEY' in key or 'TELEGRAM' in key or 'OPENROUTER' in key]
+print(f"   Найдены: {env_vars}")
+
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 OPENROUTER_KEY = os.getenv("OPENROUTER_KEY")
+
+print(f"📌 TOKEN загружен: {'✅ Да' if TOKEN else '❌ НЕТ'}")
+print(f"📌 OPENROUTER_KEY загружен: {'✅ Да' if OPENROUTER_KEY else '❌ НЕТ'}")
+
+# Проверка наличия обязательных переменных окружения
+if not TOKEN:
+    raise ValueError(
+        "❌ TELEGRAM_TOKEN не найден!\n"
+        "Установите переменную окружения TELEGRAM_TOKEN в Railway Dashboard (Settings → Variables)"
+    )
+if not OPENROUTER_KEY:
+    raise ValueError(
+        "❌ OPENROUTER_KEY не найден!\n"
+        "Установите переменную окружения OPENROUTER_KEY в Railway Dashboard (Settings → Variables)"
+    )
 
 bot = Bot(token=TOKEN)
 dp = Dispatcher()
