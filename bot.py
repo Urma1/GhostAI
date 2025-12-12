@@ -988,13 +988,21 @@ async def handler(message: Message):
             return
 
         bot_username = (await bot.get_me()).username.lower()
+        bot_id = (await bot.get_me()).id
 
         # Добавляем ВСЕ сообщения в память (для контекста переписки)
         add_to_memory(chat_id, "user", f"{username}: {message.text}", message.date)
 
-        # Проверяем упоминание бота - отвечаем только если упомянули
-        if f"@{bot_username}" in message.text.lower():
-            # убираем упоминание для чистого запроса к AI
+        # Проверяем два условия для ответа:
+        # 1. Упоминание @bot_username
+        # 2. Реплай на сообщение бота
+        is_mentioned = f"@{bot_username}" in message.text.lower()
+        is_reply_to_bot = (message.reply_to_message and
+                          message.reply_to_message.from_user.id == bot_id)
+
+        # Отвечаем если упомянули ИЛИ это реплай на сообщение бота
+        if is_mentioned or is_reply_to_bot:
+            # Убираем упоминание для чистого запроса к AI (если оно есть)
             clean_text = message.text.replace(f"@{bot_username}", "").strip()
 
             reply = await ask_ai(clean_text, chat_id, reply_context)
@@ -1007,7 +1015,7 @@ async def handler(message: Message):
 
             return await message.reply(reply)
 
-        # Если бота не упомянули - просто запомнили сообщение, не отвечаем
+        # Если бота не упомянули и это не реплай - просто запомнили сообщение, не отвечаем
         # Периодически делаем summary для общего контекста
         if len(get_memory(chat_id)) > MAX_MEMORY:
             await summarize_chat(chat_id)
