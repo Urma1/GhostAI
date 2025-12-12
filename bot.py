@@ -600,7 +600,16 @@ async def save_all_memories():
 #       AI: ОТВЕТ БОТА
 # -------------------------
 
-async def ask_ai(user_message: str, chat_id: int, reply_context: str = None):
+async def ask_ai(user_message: str, chat_id: int, reply_context: str = None, model_override: str = None):
+    """
+    Отправляет запрос к AI модели.
+
+    Args:
+        user_message: Сообщение пользователя
+        chat_id: ID чата
+        reply_context: Контекст из реплая (опционально)
+        model_override: Принудительная модель (для fallback)
+    """
     url = "https://openrouter.ai/api/v1/chat/completions"
 
     headers = {
@@ -612,7 +621,7 @@ async def ask_ai(user_message: str, chat_id: int, reply_context: str = None):
 
     # Получаем настройки чата
     settings = get_chat_settings(chat_id)
-    model_name = settings["model"]
+    model_name = model_override or settings["model"]  # Используем override если указан
     style_name = settings["style"]
 
     # Получаем полное имя модели и системный промпт
@@ -690,9 +699,78 @@ async def ask_ai(user_message: str, chat_id: int, reply_context: str = None):
         data = response.json()
 
         if "choices" not in data:
-            return f"Ошибка API: {data}"
+            # Возвращаем ошибку с информацией о модели для fallback
+            return {"error": data, "model": model_name}
 
-        return data["choices"][0]["message"]["content"]
+        return {"response": data["choices"][0]["message"]["content"], "model": model_name}
+
+
+async def ask_ai_with_fallback(user_message: str, chat_id: int, reply_context: str = None):
+    """
+    Отправляет запрос к AI с автоматическим fallback между моделями при ошибках.
+
+    Порядок моделей: deepseek → mistral → nova
+    """
+    # Получаем предпочитаемую модель из настроек
+    settings = get_chat_settings(chat_id)
+    preferred_model = settings["model"]
+
+    # Порядок попыток: сначала предпочитаемая, потом остальные
+    models_order = [preferred_model]
+    for model in ["deepseek", "mistral", "nova"]:
+        if model != preferred_model:
+            models_order.append(model)
+
+    last_error = None
+
+    for model_name in models_order:
+        try:
+            print(f"🔄 Пробую модель: {model_name}")
+            result = await ask_ai(user_message, chat_id, reply_context, model_override=model_name)
+
+            # Проверяем на ошибку
+            if isinstance(result, dict) and "error" in result:
+                error_data = result["error"]
+
+                # Проверяем код ошибки
+                if "error" in error_data and isinstance(error_data["error"], dict):
+                    error_code = error_data["error"].get("code")
+                    error_msg = error_data["error"].get("message", "")
+
+                    # Rate limit или provider error - пробуем следующую модель
+                    if error_code in [429, 502, 503] or "rate-limited" in error_msg.lower():
+                        print(f"⚠️  Модель {model_name} недоступна (код {error_code}), пробую следующую...")
+                        last_error = error_data
+                        continue
+
+                # Другая ошибка - тоже пробуем следующую
+                print(f"⚠️  Ошибка модели {model_name}, пробую следующую...")
+                last_error = error_data
+                continue
+
+            # Успех!
+            if isinstance(result, dict) and "response" in result:
+                response_text = result["response"]
+                used_model = result["model"]
+
+                # Логируем если использовали fallback
+                if used_model != preferred_model:
+                    print(f"✅ Ответ получен от резервной модели: {used_model}")
+
+                return response_text
+
+            # Неожиданный формат ответа
+            last_error = {"unexpected_format": result}
+            continue
+
+        except Exception as e:
+            print(f"❌ Исключение при запросе к {model_name}: {e}")
+            last_error = {"exception": str(e)}
+            continue
+
+    # Все модели не сработали
+    print(f"❌ Все модели недоступны. Последняя ошибка: {last_error}")
+    return f"⚠️ Все AI модели временно недоступны. Пожалуйста, попробуйте позже.\n\nПоследняя ошибка: {last_error}"
 
 
 # -------------------------
@@ -968,7 +1046,7 @@ async def handler(message: Message):
 
         add_to_memory(chat_id, "user", f"{username}: {message.text}", message.date)
 
-        reply = await ask_ai(message.text, chat_id, reply_context)
+        reply = await ask_ai_with_fallback(message.text, chat_id, reply_context)
 
         add_to_memory(chat_id, "assistant", f"Бот: {reply}", datetime.now(timezone.utc))
 
@@ -1005,7 +1083,7 @@ async def handler(message: Message):
             # Убираем упоминание для чистого запроса к AI (если оно есть)
             clean_text = message.text.replace(f"@{bot_username}", "").strip()
 
-            reply = await ask_ai(clean_text, chat_id, reply_context)
+            reply = await ask_ai_with_fallback(clean_text, chat_id, reply_context)
 
             add_to_memory(chat_id, "assistant", f"Бот: {reply}", datetime.now(timezone.utc))
 
