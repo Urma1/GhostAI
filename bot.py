@@ -32,7 +32,6 @@ AVAILABLE_MODELS = {
     "mistral": "mistralai/devstral-2512:free",
     "deepseek": "nex-agi/deepseek-v3.1-nex-n1:free",
     "nova": "amazon/nova-2-lite-v1:free",
-    "olmo": "allenai/olmo-3-32b-think:free",
     "trinity": "arcee-ai/trinity-mini:free",
     "kat": "kwaipilot/kat-coder-pro:free",
     "nemotron": "nvidia/nemotron-nano-12b-v2-vl:free"
@@ -647,14 +646,13 @@ async def help_handler(message: Message):
 /model [название] - Посмотреть или сменить модель AI
 /style [название] - Посмотреть или сменить стиль общения
 
-🤖 Доступные модели:
-• mistral - Mistral Devstral 2512 (по умолчанию)
-• deepseek - DeepSeek v3.1 Nex N1
-• nova - Amazon Nova 2 Lite
-• olmo - Allen AI OLMo 3 32B
-• trinity - Arcee Trinity Mini
-• kat - KwaiPilot KAT Coder Pro
-• nemotron - NVIDIA Nemotron Nano 12B (vision)
+🤖 Доступные модели (все протестированы):
+• mistral - Mistral Devstral 2512 (по умолчанию) ✅
+• deepseek - DeepSeek v3.1 Nex N1 ✅
+• nova - Amazon Nova 2 Lite ✅
+• trinity - Arcee Trinity Mini ✅
+• kat - KwaiPilot KAT Coder Pro ✅
+• nemotron - NVIDIA Nemotron Nano 12B (vision) ✅
 
 🎨 Стили общения:
 • ассистент - Надежный помощник для повседневных дел (по умолчанию)
