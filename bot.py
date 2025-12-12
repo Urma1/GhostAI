@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message, BotCommand
+from aiogram.types import Message, BotCommand, InlineKeyboardMarkup, InlineKeyboardButton, CallbackQuery
 from aiogram.enums import ChatType
 from dotenv import load_dotenv
 
@@ -29,15 +29,12 @@ DB_PATH = os.getenv("DB_PATH", "/data/memory.db" if os.path.exists("/data") else
 # -------------------------
 
 AVAILABLE_MODELS = {
-    "mistral": "mistralai/devstral-2512:free",
     "deepseek": "nex-agi/deepseek-v3.1-nex-n1:free",
-    "nova": "amazon/nova-2-lite-v1:free",
-    "trinity": "arcee-ai/trinity-mini:free",
-    "kat": "kwaipilot/kat-coder-pro:free",
-    "nemotron": "nvidia/nemotron-nano-12b-v2-vl:free"
+    "mistral": "mistralai/devstral-2512:free",
+    "nova": "amazon/nova-2-lite-v1:free"
 }
 
-DEFAULT_MODEL = "mistral"
+DEFAULT_MODEL = "deepseek"
 
 # -------------------------
 #   СТИЛИ ОБЩЕНИЯ
@@ -181,7 +178,7 @@ STYLE_PROMPTS = {
     }
 }
 
-DEFAULT_STYLE = "ассистент"
+DEFAULT_STYLE = "друг"
 
 
 # -------------------------
@@ -211,10 +208,28 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_settings (
             chat_id INTEGER PRIMARY KEY,
-            model TEXT DEFAULT 'mistral',
-            style TEXT DEFAULT 'ассистент',
+            model TEXT DEFAULT 'deepseek',
+            style TEXT DEFAULT 'друг',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+    """)
+
+    # Таблица для хранения последних сообщений (краткосрочная память)
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_messages (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            chat_id INTEGER,
+            role TEXT,
+            content TEXT,
+            timestamp TIMESTAMP,
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
+    # Индекс для быстрой выборки последних сообщений
+    cur.execute("""
+        CREATE INDEX IF NOT EXISTS idx_chat_messages_lookup
+        ON chat_messages(chat_id, timestamp DESC)
     """)
 
     conn.commit()
@@ -307,16 +322,89 @@ def count_summaries(chat_id: int) -> int:
     return count
 
 
+def count_messages(chat_id: int) -> int:
+    """Подсчитывает количество сообщений в БД для чата"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM chat_messages WHERE chat_id = ?",
+        (chat_id,)
+    )
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+
+def save_message_to_db(chat_id: int, role: str, content: str, timestamp):
+    """Сохраняет сообщение в БД и удаляет старые (хранит последние 100)"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # Конвертируем timestamp в ISO формат для SQLite
+    if isinstance(timestamp, datetime):
+        timestamp_str = timestamp.isoformat()
+    else:
+        timestamp_str = timestamp
+
+    # Сохраняем сообщение
+    cur.execute(
+        "INSERT INTO chat_messages (chat_id, role, content, timestamp) VALUES (?, ?, ?, ?)",
+        (chat_id, role, content, timestamp_str)
+    )
+
+    # Удаляем старые сообщения, оставляя последние 100
+    cur.execute("""
+        DELETE FROM chat_messages
+        WHERE chat_id = ? AND id NOT IN (
+            SELECT id FROM chat_messages
+            WHERE chat_id = ?
+            ORDER BY timestamp DESC
+            LIMIT 100
+        )
+    """, (chat_id, chat_id))
+
+    conn.commit()
+    conn.close()
+
+
+def load_messages_from_db(chat_id: int, limit: int = 100):
+    """Загружает последние N сообщений из БД"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        """
+        SELECT role, content, timestamp FROM chat_messages
+        WHERE chat_id = ?
+        ORDER BY timestamp DESC
+        LIMIT ?
+        """,
+        (chat_id, limit)
+    )
+    rows = cur.fetchall()
+    conn.close()
+
+    # Возвращаем в хронологическом порядке (старые → новые)
+    messages = []
+    for row in reversed(rows):
+        messages.append({
+            "role": row[0],
+            "content": row[1],
+            "timestamp": datetime.fromisoformat(row[2]) if isinstance(row[2], str) else row[2]
+        })
+    return messages
+
+
 def clear_chat_memory(chat_id: int):
-    """Очищает память чата (RAM и summaries из БД)"""
-    # Очищаем краткосрочную память
+    """Очищает память чата (RAM, БД сообщений и summaries)"""
+    # Очищаем краткосрочную память из RAM
     if chat_id in memory_buffer:
         memory_buffer[chat_id] = []
 
-    # Удаляем summaries из БД
+    # Очищаем БД
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
     cur.execute("DELETE FROM chat_summaries WHERE chat_id = ?", (chat_id,))
+    cur.execute("DELETE FROM chat_messages WHERE chat_id = ?", (chat_id,))
     conn.commit()
     conn.close()
 
@@ -339,6 +427,9 @@ def add_to_memory(chat_id, role, text, timestamp=None):
         "timestamp": timestamp
     })
 
+    # Сохраняем сообщение в БД для постоянного хранения
+    save_message_to_db(chat_id, role, text, timestamp)
+
     # просто ограничиваем длину буфера здесь,
     # summary делаем отдельно в хэндлере
     if len(memory_buffer[chat_id]) > MAX_MEMORY + TAIL_AFTER_SUMMARY:
@@ -346,7 +437,11 @@ def add_to_memory(chat_id, role, text, timestamp=None):
 
 
 def get_memory(chat_id):
-    """Возвращает краткосрочную память чата"""
+    """Возвращает краткосрочную память чата (автозагрузка из БД при первом обращении)"""
+    # Если память для чата пустая, загружаем из БД
+    if chat_id not in memory_buffer or len(memory_buffer[chat_id]) == 0:
+        memory_buffer[chat_id] = load_messages_from_db(chat_id, limit=MAX_MEMORY)
+
     return memory_buffer.get(chat_id, [])
 
 
@@ -624,20 +719,17 @@ async def help_handler(message: Message):
 /model [название] - Посмотреть или сменить модель AI
 /style [название] - Посмотреть или сменить стиль общения
 
-🤖 Доступные модели (все протестированы):
-• mistral - Mistral Devstral 2512 (по умолчанию) ✅
-• deepseek - DeepSeek v3.1 Nex N1 ✅
+🤖 Доступные модели (топ-3 для чатов):
+• deepseek - DeepSeek v3.1 Nex N1 (по умолчанию) ✅
+• mistral - Mistral Devstral 2512 ✅
 • nova - Amazon Nova 2 Lite ✅
-• trinity - Arcee Trinity Mini ✅
-• kat - KwaiPilot KAT Coder Pro ✅
-• nemotron - NVIDIA Nemotron Nano 12B (vision) ✅
 
 🎨 Стили общения:
-• ассистент - Надежный помощник для повседневных дел (по умолчанию)
+• друг - Неформальный собеседник как обычный чел (по умолчанию)
+• ассистент - Надежный помощник для повседневных дел
 • своб - Свободный без фильтров и цензуры
 • терапевт - Эмпатичный советчик по психическому здоровью
 • сказочник - Мастер захватывающих историй
-• друг - Неформальный собеседник как обычный чел
 • доктор - Дружелюбный ИИ-доктор
 • конспиролог - Охотник за теориями заговора
 • мотиватор - Жесткий коуч для взрослых +18
@@ -662,6 +754,7 @@ async def stats_handler(message: Message):
     settings = get_chat_settings(chat_id)
     memory_count = len(get_memory(chat_id))
     summaries_count = count_summaries(chat_id)
+    messages_count = count_messages(chat_id)
 
     model_name = settings["model"]
     model_full = AVAILABLE_MODELS.get(model_name, "неизвестно")
@@ -672,6 +765,7 @@ async def stats_handler(message: Message):
 📊 Статистика чата:
 
 💾 Сообщений в памяти: {memory_count}
+💿 Всего сохранено в БД: {messages_count}
 📝 Сохранено сводок: {summaries_count}
 🤖 Текущая модель: {model_name} ({model_full})
 🎨 Стиль общения: {style_info['name']} - {style_info['desc']}
@@ -685,19 +779,34 @@ async def model_handler(message: Message):
     args = message.text.split(maxsplit=1)
 
     if len(args) == 1:
-        # Показать текущую модель
+        # Показать текущую модель с кнопками выбора
         settings = get_chat_settings(chat_id)
         current_model = settings["model"]
         model_full = AVAILABLE_MODELS.get(current_model, "неизвестно")
 
-        models_list = "\n".join([f"• {k} - {v}" for k, v in AVAILABLE_MODELS.items()])
+        # Создаем кнопки для каждой модели
+        buttons = []
+        model_names = {
+            "deepseek": "DeepSeek v3.1 (лучшая)",
+            "mistral": "Mistral Devstral",
+            "nova": "Amazon Nova"
+        }
+
+        for key in AVAILABLE_MODELS.keys():
+            button_text = model_names.get(key, key)
+            if key == current_model:
+                button_text = f"✅ {button_text}"
+            buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"model:{key}")])
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
         await message.answer(
-            f"🤖 Текущая модель: {current_model} ({model_full})\n\n"
-            f"Доступные модели:\n{models_list}\n\n"
-            f"Использование: /model <название>"
+            f"🤖 Текущая модель: {current_model}\n{model_full}\n\n"
+            f"Выберите модель:",
+            reply_markup=keyboard
         )
     else:
-        # Сменить модель
+        # Сменить модель через текст (для обратной совместимости)
         new_model = args[1].strip()
 
         if new_model in AVAILABLE_MODELS:
@@ -715,22 +824,41 @@ async def style_handler(message: Message):
     args = message.text.split(maxsplit=1)
 
     if len(args) == 1:
-        # Показать текущий стиль
+        # Показать текущий стиль с кнопками выбора
         settings = get_chat_settings(chat_id)
         current_style = settings["style"]
         current_info = STYLE_PROMPTS.get(current_style, STYLE_PROMPTS[DEFAULT_STYLE])
 
-        styles_list = "\n".join([
-            f"• {k} - {v['desc']}" for k, v in STYLE_PROMPTS.items()
-        ])
+        # Создаем кнопки для каждого стиля (по 2 в ряд)
+        buttons = []
+        row = []
+
+        for key, info in STYLE_PROMPTS.items():
+            button_text = info['name']
+            if key == current_style:
+                button_text = f"✅ {button_text}"
+
+            row.append(InlineKeyboardButton(text=button_text, callback_data=f"style:{key}"))
+
+            # По 2 кнопки в ряд
+            if len(row) == 2:
+                buttons.append(row)
+                row = []
+
+        # Добавляем последнюю кнопку если осталась
+        if row:
+            buttons.append(row)
+
+        keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
         await message.answer(
             f"🎨 Текущий стиль: {current_info['name']}\n"
             f"📝 {current_info['desc']}\n\n"
-            f"Доступные стили:\n{styles_list}\n\n"
-            f"Использование: /style <название>"
+            f"Выберите стиль:",
+            reply_markup=keyboard
         )
     else:
-        # Сменить стиль
+        # Сменить стиль через текст (для обратной совместимости)
         new_style = args[1].strip().lower()
 
         if new_style in STYLE_PROMPTS:
@@ -743,6 +871,83 @@ async def style_handler(message: Message):
         else:
             styles_list = ", ".join(STYLE_PROMPTS.keys())
             await message.answer(f"❌ Неизвестный стиль. Доступные: {styles_list}")
+
+
+# Обработчик нажатий на inline кнопки
+@dp.callback_query(lambda c: c.data.startswith(('model:', 'style:')))
+async def callback_handler(callback: CallbackQuery):
+    chat_id = callback.message.chat.id
+    data_parts = callback.data.split(':')
+    setting_type = data_parts[0]  # 'model' или 'style'
+    setting_value = data_parts[1]
+
+    if setting_type == 'model':
+        if setting_value in AVAILABLE_MODELS:
+            update_chat_setting(chat_id, "model", setting_value)
+            model_full = AVAILABLE_MODELS[setting_value]
+
+            # Обновляем сообщение с новыми кнопками
+            settings = get_chat_settings(chat_id)
+            current_model = settings["model"]
+
+            buttons = []
+            model_names = {
+                "deepseek": "DeepSeek v3.1 (лучшая)",
+                "mistral": "Mistral Devstral",
+                "nova": "Amazon Nova"
+            }
+
+            for key in AVAILABLE_MODELS.keys():
+                button_text = model_names.get(key, key)
+                if key == current_model:
+                    button_text = f"✅ {button_text}"
+                buttons.append([InlineKeyboardButton(text=button_text, callback_data=f"model:{key}")])
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+            await callback.message.edit_text(
+                f"🤖 Текущая модель: {current_model}\n{model_full}\n\n"
+                f"Выберите модель:",
+                reply_markup=keyboard
+            )
+            await callback.answer(f"✅ Модель изменена на {setting_value}")
+
+    elif setting_type == 'style':
+        if setting_value in STYLE_PROMPTS:
+            update_chat_setting(chat_id, "style", setting_value)
+            style_info = STYLE_PROMPTS[setting_value]
+
+            # Обновляем сообщение с новыми кнопками
+            settings = get_chat_settings(chat_id)
+            current_style = settings["style"]
+            current_info = STYLE_PROMPTS.get(current_style, STYLE_PROMPTS[DEFAULT_STYLE])
+
+            buttons = []
+            row = []
+
+            for key, info in STYLE_PROMPTS.items():
+                button_text = info['name']
+                if key == current_style:
+                    button_text = f"✅ {button_text}"
+
+                row.append(InlineKeyboardButton(text=button_text, callback_data=f"style:{key}"))
+
+                if len(row) == 2:
+                    buttons.append(row)
+                    row = []
+
+            if row:
+                buttons.append(row)
+
+            keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
+
+            await callback.message.edit_text(
+                f"🎨 Текущий стиль: {current_info['name']}\n"
+                f"📝 {current_info['desc']}\n\n"
+                f"Выберите стиль:",
+                reply_markup=keyboard
+            )
+            await callback.answer(f"✅ Стиль изменён на {style_info['name']}")
 
 
 @dp.message()
