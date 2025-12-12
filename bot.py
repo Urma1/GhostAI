@@ -4,7 +4,7 @@ import logging
 import os
 import sqlite3
 import signal
-from datetime import datetime
+from datetime import datetime, timezone
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
@@ -223,7 +223,7 @@ def add_to_memory(chat_id, role, text, timestamp=None):
         memory_buffer[chat_id] = []
 
     if timestamp is None:
-        timestamp = datetime.now()
+        timestamp = datetime.now(timezone.utc)
 
     memory_buffer[chat_id].append({
         "role": role,
@@ -429,7 +429,7 @@ async def ask_ai(user_message: str, chat_id: int, reply_context: str = None):
 
     # Форматируем историю с временными метками
     history_messages = []
-    now = datetime.now()
+    now = datetime.now(timezone.utc)
 
     for msg in history:
         timestamp = msg.get("timestamp", now)
@@ -633,7 +633,7 @@ async def handler(message: Message):
 
         reply = await ask_ai(message.text, chat_id, reply_context)
 
-        add_to_memory(chat_id, "assistant", f"Бот: {reply}", datetime.now())
+        add_to_memory(chat_id, "assistant", f"Бот: {reply}", datetime.now(timezone.utc))
 
         # если переписка разрослась — делаем summary
         if len(get_memory(chat_id)) > MAX_MEMORY:
@@ -662,7 +662,7 @@ async def handler(message: Message):
 
             reply = await ask_ai(clean_text, chat_id, reply_context)
 
-            add_to_memory(chat_id, "assistant", f"Бот: {reply}", datetime.now())
+            add_to_memory(chat_id, "assistant", f"Бот: {reply}", datetime.now(timezone.utc))
 
             # если память большая — делаем summary
             if len(get_memory(chat_id)) > MAX_MEMORY:
