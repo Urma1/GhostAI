@@ -4,6 +4,7 @@ import logging
 import os
 import sqlite3
 import signal
+from datetime import datetime
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
@@ -216,12 +217,19 @@ def clear_chat_memory(chat_id: int):
 #   ГЛОБАЛЬНАЯ ПАМЯТЬ В RAM
 # -------------------------
 
-def add_to_memory(chat_id, role, text):
-    """Добавляет сообщение в краткосрочную память чата"""
+def add_to_memory(chat_id, role, text, timestamp=None):
+    """Добавляет сообщение в краткосрочную память чата с временной меткой"""
     if chat_id not in memory_buffer:
         memory_buffer[chat_id] = []
 
-    memory_buffer[chat_id].append({"role": role, "content": text})
+    if timestamp is None:
+        timestamp = datetime.now()
+
+    memory_buffer[chat_id].append({
+        "role": role,
+        "content": text,
+        "timestamp": timestamp
+    })
 
     # просто ограничиваем длину буфера здесь,
     # summary делаем отдельно в хэндлере
@@ -419,6 +427,35 @@ async def ask_ai(user_message: str, chat_id: int, reply_context: str = None):
         for s in summaries
     ]
 
+    # Форматируем историю с временными метками
+    history_messages = []
+    now = datetime.now()
+
+    for msg in history:
+        timestamp = msg.get("timestamp", now)
+        # Вычисляем разницу во времени
+        time_diff = now - timestamp
+
+        # Форматируем время в читаемый вид
+        if time_diff.total_seconds() < 60:
+            time_str = "только что"
+        elif time_diff.total_seconds() < 3600:
+            minutes = int(time_diff.total_seconds() / 60)
+            time_str = f"{minutes} мин назад"
+        elif time_diff.total_seconds() < 86400:
+            hours = int(time_diff.total_seconds() / 3600)
+            time_str = f"{hours} ч назад"
+        else:
+            days = int(time_diff.total_seconds() / 86400)
+            time_str = f"{days} дн назад"
+
+        # Добавляем сообщение с временной меткой
+        content_with_time = f"[{time_str}] {msg['content']}"
+        history_messages.append({
+            "role": msg["role"],
+            "content": content_with_time
+        })
+
     # Если есть контекст из реплая, добавляем его в сообщение
     if reply_context:
         user_message = f"[Отвечая на: {reply_context}]\n{user_message}"
@@ -431,7 +468,7 @@ async def ask_ai(user_message: str, chat_id: int, reply_context: str = None):
                 "content": system_prompt
             },
             *summary_messages,
-            *history,
+            *history_messages,
             {"role": "user", "content": user_message}
         ]
     }
@@ -592,11 +629,11 @@ async def handler(message: Message):
     # --------------------------
     if message.chat.type == ChatType.PRIVATE:
 
-        add_to_memory(chat_id, "user", f"{username}: {message.text}")
+        add_to_memory(chat_id, "user", f"{username}: {message.text}", message.date)
 
         reply = await ask_ai(message.text, chat_id, reply_context)
 
-        add_to_memory(chat_id, "assistant", f"Бот: {reply}")
+        add_to_memory(chat_id, "assistant", f"Бот: {reply}", datetime.now())
 
         # если переписка разрослась — делаем summary
         if len(get_memory(chat_id)) > MAX_MEMORY:
@@ -616,7 +653,7 @@ async def handler(message: Message):
         bot_username = (await bot.get_me()).username.lower()
 
         # Добавляем ВСЕ сообщения в память (для контекста переписки)
-        add_to_memory(chat_id, "user", f"{username}: {message.text}")
+        add_to_memory(chat_id, "user", f"{username}: {message.text}", message.date)
 
         # Проверяем упоминание бота - отвечаем только если упомянули
         if f"@{bot_username}" in message.text.lower():
@@ -625,7 +662,7 @@ async def handler(message: Message):
 
             reply = await ask_ai(clean_text, chat_id, reply_context)
 
-            add_to_memory(chat_id, "assistant", f"Бот: {reply}")
+            add_to_memory(chat_id, "assistant", f"Бот: {reply}", datetime.now())
 
             # если память большая — делаем summary
             if len(get_memory(chat_id)) > MAX_MEMORY:
