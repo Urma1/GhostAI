@@ -8,7 +8,7 @@ from datetime import datetime
 
 from aiogram import Bot, Dispatcher
 from aiogram.filters import Command
-from aiogram.types import Message
+from aiogram.types import Message, BotCommand
 from aiogram.enums import ChatType
 from dotenv import load_dotenv
 
@@ -690,12 +690,29 @@ def signal_handler(signum, frame):
     shutdown_event.set()
 
 
+async def set_bot_commands():
+    """Регистрирует команды бота для автоподстановки в Telegram"""
+    commands = [
+        BotCommand(command="start", description="Начать работу с ботом"),
+        BotCommand(command="help", description="Показать справку"),
+        BotCommand(command="clear", description="Очистить память чата"),
+        BotCommand(command="stats", description="Показать статистику"),
+        BotCommand(command="model", description="Посмотреть/сменить модель AI"),
+        BotCommand(command="style", description="Посмотреть/сменить стиль общения"),
+    ]
+    await bot.set_my_commands(commands)
+    print("✅ Команды бота зарегистрированы")
+
+
 async def main():
     logging.basicConfig(level=logging.INFO)
 
     # Регистрируем обработчики сигналов
     signal.signal(signal.SIGTERM, signal_handler)  # Railway отправляет SIGTERM при остановке
     signal.signal(signal.SIGINT, signal_handler)   # Ctrl+C локально
+
+    # Регистрируем команды бота
+    await set_bot_commands()
 
     print("✅ Бот запущен. Нажмите Ctrl+C для остановки.")
 
