@@ -28,14 +28,16 @@ DB_PATH = os.getenv("DB_PATH", "/data/memory.db" if os.path.exists("/data") else
 # -------------------------
 
 AVAILABLE_MODELS = {
-    "deepseek": "deepseek/deepseek-chat:free",
-    "qwen": "qwen/qwen-2.5-72b-instruct:free",
-    "llama": "meta-llama/llama-3.3-70b-instruct:free",
-    "phi": "microsoft/phi-4:free",
-    "gemma": "google/gemma-2-9b-it:free"
+    "mistral": "mistralai/devstral-2512:free",
+    "deepseek": "nex-agi/deepseek-v3.1-nex-n1:free",
+    "nova": "amazon/nova-2-lite-v1:free",
+    "olmo": "allenai/olmo-3-32b-think:free",
+    "trinity": "arcee-ai/trinity-mini:free",
+    "kat": "kwaipilot/kat-coder-pro:free",
+    "nemotron": "nvidia/nemotron-nano-12b-v2-vl:free"
 }
 
-DEFAULT_MODEL = "deepseek"
+DEFAULT_MODEL = "mistral"
 
 # -------------------------
 #   СТИЛИ ОБЩЕНИЯ
@@ -100,7 +102,7 @@ def init_db():
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_settings (
             chat_id INTEGER PRIMARY KEY,
-            model TEXT DEFAULT 'deepseek',
+            model TEXT DEFAULT 'mistral',
             style TEXT DEFAULT 'short',
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
@@ -470,11 +472,13 @@ async def help_handler(message: Message):
 /style [название] - Посмотреть или сменить стиль общения
 
 🤖 Доступные модели:
-• deepseek - DeepSeek Chat (по умолчанию)
-• qwen - Qwen 2.5 72B
-• llama - Llama 3.3 70B
-• phi - Microsoft Phi-4
-• gemma - Google Gemma 2 9B
+• mistral - Mistral Devstral 2512 (по умолчанию)
+• deepseek - DeepSeek v3.1 Nex N1
+• nova - Amazon Nova 2 Lite
+• olmo - Allen AI OLMo 3 32B
+• trinity - Arcee Trinity Mini
+• kat - KwaiPilot KAT Coder Pro
+• nemotron - NVIDIA Nemotron Nano 12B (vision)
 
 🎨 Стили общения:
 • short - Краткие ответы (по умолчанию)
