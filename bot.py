@@ -23,6 +23,55 @@ SUMMARY_LIMIT = 5           # сколько последних summary подг
 # Railway Volume поддержка: если есть /data, используем её
 DB_PATH = os.getenv("DB_PATH", "/data/memory.db" if os.path.exists("/data") else "memory.db")
 
+# -------------------------
+#   ДОСТУПНЫЕ МОДЕЛИ
+# -------------------------
+
+AVAILABLE_MODELS = {
+    "deepseek": "deepseek/deepseek-chat:free",
+    "qwen": "qwen/qwen-2.5-72b-instruct:free",
+    "llama": "meta-llama/llama-3.3-70b-instruct:free",
+    "phi": "microsoft/phi-4:free",
+    "gemma": "google/gemma-2-9b-it:free"
+}
+
+DEFAULT_MODEL = "deepseek"
+
+# -------------------------
+#   СТИЛИ ОБЩЕНИЯ
+# -------------------------
+
+STYLE_PROMPTS = {
+    "short": (
+        "Ты дружелюбный участник телеграм-чата. "
+        "Отвечай КОРОТКО: 1–2 предложения максимум. "
+        "Пиши просто, как человек: без формальностей, "
+        "без сложных слов, без больших абзацев. "
+        "Если вопрос неполный — уточни. "
+        "Учитывай контекст последних сообщений и сводки прошлых разговоров."
+    ),
+    "detailed": (
+        "Ты умный и детальный ассистент в телеграм-чате. "
+        "Давай подробные ответы с объяснениями и примерами. "
+        "Структурируй информацию, используй списки где уместно. "
+        "Учитывай контекст последних сообщений и сводки прошлых разговоров."
+    ),
+    "casual": (
+        "Ты расслабленный друг в чате. "
+        "Общайся неформально, можно с юмором и эмодзи. "
+        "Отвечай коротко и по делу, но дружелюбно. "
+        "Учитывай контекст последних сообщений и сводки прошлых разговоров."
+    ),
+    "formal": (
+        "Ты профессиональный помощник. "
+        "Отвечай вежливо, структурированно и по существу. "
+        "Используй точные формулировки. "
+        "Учитывай контекст последних сообщений и сводки прошлых разговоров."
+    )
+}
+
+DEFAULT_STYLE = "short"
+
 
 # -------------------------
 #   РАБОТА С БАЗОЙ
@@ -36,6 +85,8 @@ def init_db():
 
     conn = sqlite3.connect(DB_PATH)
     cur = conn.cursor()
+
+    # Таблица для хранения сводок переписок
     cur.execute("""
         CREATE TABLE IF NOT EXISTS chat_summaries (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -44,6 +95,17 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     """)
+
+    # Таблица для хранения настроек чатов
+    cur.execute("""
+        CREATE TABLE IF NOT EXISTS chat_settings (
+            chat_id INTEGER PRIMARY KEY,
+            model TEXT DEFAULT 'deepseek',
+            style TEXT DEFAULT 'short',
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    """)
+
     conn.commit()
     conn.close()
 
@@ -75,6 +137,77 @@ def load_recent_summaries(chat_id: int, limit: int = SUMMARY_LIMIT):
     conn.close()
     # возвращаем в хронологическом порядке (старые → новые)
     return [row[0] for row in rows[::-1]]
+
+
+def get_chat_settings(chat_id: int):
+    """Получает настройки чата из БД"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT model, style FROM chat_settings WHERE chat_id = ?",
+        (chat_id,)
+    )
+    row = cur.fetchone()
+    conn.close()
+
+    if row:
+        return {"model": row[0], "style": row[1]}
+    else:
+        # Если настроек нет, возвращаем дефолтные
+        return {"model": DEFAULT_MODEL, "style": DEFAULT_STYLE}
+
+
+def update_chat_setting(chat_id: int, setting_name: str, value: str):
+    """Обновляет одну настройку чата"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+
+    # Проверяем, есть ли уже запись для этого чата
+    cur.execute("SELECT chat_id FROM chat_settings WHERE chat_id = ?", (chat_id,))
+    exists = cur.fetchone()
+
+    if exists:
+        # Обновляем существующую запись
+        cur.execute(
+            f"UPDATE chat_settings SET {setting_name} = ?, updated_at = CURRENT_TIMESTAMP WHERE chat_id = ?",
+            (value, chat_id)
+        )
+    else:
+        # Создаём новую запись
+        cur.execute(
+            f"INSERT INTO chat_settings (chat_id, {setting_name}) VALUES (?, ?)",
+            (chat_id, value)
+        )
+
+    conn.commit()
+    conn.close()
+
+
+def count_summaries(chat_id: int) -> int:
+    """Подсчитывает количество summaries для чата"""
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT COUNT(*) FROM chat_summaries WHERE chat_id = ?",
+        (chat_id,)
+    )
+    count = cur.fetchone()[0]
+    conn.close()
+    return count
+
+
+def clear_chat_memory(chat_id: int):
+    """Очищает память чата (RAM и summaries из БД)"""
+    # Очищаем краткосрочную память
+    if chat_id in memory_buffer:
+        memory_buffer[chat_id] = []
+
+    # Удаляем summaries из БД
+    conn = sqlite3.connect(DB_PATH)
+    cur = conn.cursor()
+    cur.execute("DELETE FROM chat_summaries WHERE chat_id = ?", (chat_id,))
+    conn.commit()
+    conn.close()
 
 
 # -------------------------
@@ -152,7 +285,7 @@ async def summarize_chat(chat_id: int):
         "Content-Type": "application/json"
     }
     body = {
-        "model": "google/gemini-flash-1.5:free",
+        "model": "deepseek/deepseek-chat:free",
         "messages": [
             {
                 "role": "system",
@@ -216,7 +349,7 @@ async def save_all_memories():
                 "Content-Type": "application/json"
             }
             body = {
-                "model": "google/gemini-flash-1.5:free",
+                "model": "deepseek/deepseek-chat:free",
                 "messages": [
                     {
                         "role": "system",
@@ -254,7 +387,7 @@ async def save_all_memories():
 #       AI: ОТВЕТ БОТА
 # -------------------------
 
-async def ask_ai(user_message: str, chat_id: int):
+async def ask_ai(user_message: str, chat_id: int, reply_context: str = None):
     url = "https://openrouter.ai/api/v1/chat/completions"
 
     headers = {
@@ -263,6 +396,15 @@ async def ask_ai(user_message: str, chat_id: int):
         "Referer": "https://github.com/Urma1/GhostAI",
         "X-Title": "GhostAI Bot"
     }
+
+    # Получаем настройки чата
+    settings = get_chat_settings(chat_id)
+    model_name = settings["model"]
+    style_name = settings["style"]
+
+    # Получаем полное имя модели и системный промпт
+    model_full = AVAILABLE_MODELS.get(model_name, AVAILABLE_MODELS[DEFAULT_MODEL])
+    system_prompt = STYLE_PROMPTS.get(style_name, STYLE_PROMPTS[DEFAULT_STYLE])
 
     history = get_memory(chat_id)
     summaries = load_recent_summaries(chat_id)
@@ -275,19 +417,16 @@ async def ask_ai(user_message: str, chat_id: int):
         for s in summaries
     ]
 
+    # Если есть контекст из реплая, добавляем его в сообщение
+    if reply_context:
+        user_message = f"[Отвечая на: {reply_context}]\n{user_message}"
+
     body = {
-        "model": "google/gemini-flash-1.5:free",
+        "model": model_full,
         "messages": [
             {
                 "role": "system",
-                "content": (
-                    "Ты дружелюбный участник телеграм-чата. "
-                    "Отвечай КОРОТКО: 1–2 предложения максимум. "
-                    "Пиши просто, как человек: без формальностей, "
-                    "без сложных слов, без больших абзацев. "
-                    "Если вопрос неполный — уточни. "
-                    "Учитывай контекст последних сообщений и сводки прошлых разговоров."
-                )
+                "content": system_prompt
             },
             *summary_messages,
             *history,
@@ -313,8 +452,124 @@ async def ask_ai(user_message: str, chat_id: int):
 @dp.message(Command("start"))
 async def start_handler(message: Message):
     await message.answer(
-        "Привет! Я теперь помню контекст, делаю сводки и отвечаю кратко, как человек."
+        "Привет! Я теперь помню контекст, делаю сводки и отвечаю кратко, как человек.\n\n"
+        "Используй /help чтобы увидеть все команды."
     )
+
+
+@dp.message(Command("help"))
+async def help_handler(message: Message):
+    help_text = """
+📋 Доступные команды:
+
+/start - Начать работу с ботом
+/help - Показать это сообщение
+/clear - Очистить память чата
+/stats - Показать статистику чата
+/model [название] - Посмотреть или сменить модель AI
+/style [название] - Посмотреть или сменить стиль общения
+
+🤖 Доступные модели:
+• deepseek - DeepSeek Chat (по умолчанию)
+• qwen - Qwen 2.5 72B
+• llama - Llama 3.3 70B
+• phi - Microsoft Phi-4
+• gemma - Google Gemma 2 9B
+
+🎨 Стили общения:
+• short - Краткие ответы (по умолчанию)
+• detailed - Подробные ответы
+• casual - Неформальное общение
+• formal - Формальное общение
+"""
+    await message.answer(help_text)
+
+
+@dp.message(Command("clear"))
+async def clear_handler(message: Message):
+    chat_id = message.chat.id
+    clear_chat_memory(chat_id)
+    await message.answer("✅ Память чата очищена!")
+
+
+@dp.message(Command("stats"))
+async def stats_handler(message: Message):
+    chat_id = message.chat.id
+    settings = get_chat_settings(chat_id)
+    memory_count = len(get_memory(chat_id))
+    summaries_count = count_summaries(chat_id)
+
+    model_name = settings["model"]
+    model_full = AVAILABLE_MODELS.get(model_name, "неизвестно")
+    style_name = settings["style"]
+
+    stats_text = f"""
+📊 Статистика чата:
+
+💾 Сообщений в памяти: {memory_count}
+📝 Сохранено сводок: {summaries_count}
+🤖 Текущая модель: {model_name} ({model_full})
+🎨 Стиль общения: {style_name}
+"""
+    await message.answer(stats_text)
+
+
+@dp.message(Command("model"))
+async def model_handler(message: Message):
+    chat_id = message.chat.id
+    args = message.text.split(maxsplit=1)
+
+    if len(args) == 1:
+        # Показать текущую модель
+        settings = get_chat_settings(chat_id)
+        current_model = settings["model"]
+        model_full = AVAILABLE_MODELS.get(current_model, "неизвестно")
+
+        models_list = "\n".join([f"• {k} - {v}" for k, v in AVAILABLE_MODELS.items()])
+        await message.answer(
+            f"🤖 Текущая модель: {current_model} ({model_full})\n\n"
+            f"Доступные модели:\n{models_list}\n\n"
+            f"Использование: /model <название>"
+        )
+    else:
+        # Сменить модель
+        new_model = args[1].strip()
+
+        if new_model in AVAILABLE_MODELS:
+            update_chat_setting(chat_id, "model", new_model)
+            model_full = AVAILABLE_MODELS[new_model]
+            await message.answer(f"✅ Модель изменена на: {new_model} ({model_full})")
+        else:
+            models_list = ", ".join(AVAILABLE_MODELS.keys())
+            await message.answer(f"❌ Неизвестная модель. Доступные: {models_list}")
+
+
+@dp.message(Command("style"))
+async def style_handler(message: Message):
+    chat_id = message.chat.id
+    args = message.text.split(maxsplit=1)
+
+    if len(args) == 1:
+        # Показать текущий стиль
+        settings = get_chat_settings(chat_id)
+        current_style = settings["style"]
+
+        styles_list = "\n".join([f"• {k}" for k in STYLE_PROMPTS.keys()])
+        await message.answer(
+            f"🎨 Текущий стиль: {current_style}\n\n"
+            f"Доступные стили:\n{styles_list}\n\n"
+            f"Использование: /style <название>"
+        )
+    else:
+        # Сменить стиль
+        new_style = args[1].strip()
+
+        if new_style in STYLE_PROMPTS:
+            update_chat_setting(chat_id, "style", new_style)
+            await message.answer(f"✅ Стиль изменён на: {new_style}")
+        else:
+            styles_list = ", ".join(STYLE_PROMPTS.keys())
+            await message.answer(f"❌ Неизвестный стиль. Доступные: {styles_list}")
 
 
 @dp.message()
@@ -323,6 +578,11 @@ async def handler(message: Message):
     chat_id = message.chat.id
     username = message.from_user.first_name or message.from_user.username or "Пользователь"
 
+    # Проверяем, есть ли реплай на сообщение
+    reply_context = None
+    if message.reply_to_message and message.reply_to_message.text:
+        reply_context = message.reply_to_message.text[:200]  # Берём первые 200 символов
+
     # --------------------------
     # ЛИЧНЫЕ СООБЩЕНИЯ
     # --------------------------
@@ -330,7 +590,7 @@ async def handler(message: Message):
 
         add_to_memory(chat_id, "user", f"{username}: {message.text}")
 
-        reply = await ask_ai(message.text, chat_id)
+        reply = await ask_ai(message.text, chat_id, reply_context)
 
         add_to_memory(chat_id, "assistant", f"Бот: {reply}")
 
@@ -359,7 +619,7 @@ async def handler(message: Message):
             # убираем упоминание для чистого запроса к AI
             clean_text = message.text.replace(f"@{bot_username}", "").strip()
 
-            reply = await ask_ai(clean_text, chat_id)
+            reply = await ask_ai(clean_text, chat_id, reply_context)
 
             add_to_memory(chat_id, "assistant", f"Бот: {reply}")
 
