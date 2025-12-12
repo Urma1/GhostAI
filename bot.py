@@ -152,7 +152,7 @@ async def summarize_chat(chat_id: int):
         "Content-Type": "application/json"
     }
     body = {
-        "model": "x-ai/grok-4.1-fast:free",
+        "model": "tngtech/deepseek-r1t2-chimera:free",
         "messages": [
             {
                 "role": "system",
@@ -216,7 +216,7 @@ async def save_all_memories():
                 "Content-Type": "application/json"
             }
             body = {
-                "model": "x-ai/grok-4.1-fast:free",
+                "model": "tngtech/deepseek-r1t2-chimera:free",
                 "messages": [
                     {
                         "role": "system",
@@ -276,7 +276,7 @@ async def ask_ai(user_message: str, chat_id: int):
     ]
 
     body = {
-        "model": "x-ai/grok-4.1-fast:free",
+        "model": "tngtech/deepseek-r1t2-chimera:free",
         "messages": [
             {
                 "role": "system",
